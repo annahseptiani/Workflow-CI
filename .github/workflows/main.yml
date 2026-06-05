@@ -1,78 +1,9 @@
-name: workflow-ci-mlflow
-
-on:
-  push:
-    branches: ["main"]
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12.7
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12.7"
-
-      - name: Verify Python installation
-        run: |
-          python --version
-          pip --version
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install mlflow==2.22.4 pandas scikit-learn==1.6.1 numpy scipy
-
-      - name: Run MLflow project
-        working-directory: MLProject
-        env:
-          MLFLOW_TRACKING_URI: file://${{ github.workspace }}/MLProject/mlruns
-        run: mlflow run . --env-manager=local
-
-      - name: Extract run_id
-        id: runid
-        working-directory: MLProject
-        env:
-          MLFLOW_TRACKING_URI: file://${{ github.workspace }}/MLProject/mlruns
-        run: |
-          if [ -f "mlflow_run_id.txt" ]; then
-            RUN_ID=$(cat mlflow_run_id.txt)
-            echo "Found run_id from file: $RUN_ID"
-          else
-            echo "Run ID file not found, searching in mlruns directory..."
-            RUN_ID=$(find mlruns/0 -maxdepth 1 -type d -name '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2 | xargs -r basename)
-          fi
-          
-          if [ -z "$RUN_ID" ] || [ "$RUN_ID" == "0" ]; then
-            echo "ERROR: Could not extract valid run_id"
-            exit 1
-          fi
-          
-          if ! echo "$RUN_ID" | grep -qE '^[0-9a-f]{32}$'; then
-            echo "ERROR: Invalid run_id format: $RUN_ID"
-            exit 1
-          fi
-          
-          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "Extracted MLflow run_id: $RUN_ID"
-
-      - name: Upload MLflow artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: mlflow_artifacts_${{ steps.runid.outputs.run_id }}
-          path: MLProject/mlruns
-
-      - name: Build Docker model image
+- name: Build Docker model image
         working-directory: MLProject
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          RUN_ID="${{ steps.runid.outputs.run_id }}"
+          RUN_ID="${{ secrets.runid.outputs.run_id || steps.runid.outputs.run_id }}"
           if [ -z "$RUN_ID" ]; then
             echo "ERROR: run_id is empty"
             exit 1
@@ -86,7 +17,7 @@ jobs:
           
           IMAGE="$DOCKERHUB_USERNAME/wine-quality-model:latest"
           
-          # Membuat Dockerfile secara otomatis di dalam cloud server
+          # Membuat Dockerfile secara otomatis di dalam folder MLProject
           cat > Dockerfile <<'EOF'
           FROM python:3.12-slim
 
@@ -102,6 +33,7 @@ jobs:
               && apt-get install -y --no-install-recommends build-essential \
               && rm -rf /var/lib/apt/lists/*
 
+          # Menyalin requirements.txt yang ada di folder kerja saat ini
           COPY requirements.txt /app/requirements.txt
           RUN python -m pip install --upgrade pip \
               && pip install --no-cache-dir -r /app/requirements.txt \
@@ -111,33 +43,11 @@ jobs:
 
           EXPOSE 8000
 
-          CMD mlflow models serve \
-              -m "/app/mlruns/0/${RUN_ID}/artifacts/model" \
-              --host 0.0.0.0 \
-              --port 8000 \
-              --env-manager local
+          CMD ["mlflow", "models", "serve", "-m", "/app/mlruns/0/${RUN_ID}/artifacts/model", "--host", "0.0.0.0", "--port", "8000", "--env-manager", "local"]
           EOF
 
+          # Menjalankan docker build dengan context tanda titik (.) yang mengarah ke folder MLProject
           docker build \
             --build-arg RUN_ID="$RUN_ID" \
             -t "$IMAGE" \
             .
-
-      - name: Login to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          DOCKERHUB_USERNAME="$(printf '%s' "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-
-      - name: Push Docker image to Docker Hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          DOCKERHUB_USERNAME="$(printf '%s' "$DOCKERHUB_USERNAME" | tr -d '[:space:]')"
-          IMAGE="$DOCKERHUB_USERNAME/wine-quality-model:latest"
-          docker push "$IMAGE"
-
-      - name: Complete job
-        run: echo "Job complete"
