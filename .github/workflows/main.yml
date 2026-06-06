@@ -68,7 +68,6 @@ jobs:
           path: MLProject/mlruns
 
       - name: Build Docker model image
-        working-directory: MLProject
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
@@ -86,6 +85,7 @@ jobs:
           
           IMAGE="$DOCKERHUB_USERNAME/wine-quality-model:latest"
           
+          # Membuat Dockerfile langsung di folder utama (root) repositori kerja runner
           cat > Dockerfile <<'EOF'
           FROM python:3.12-slim
 
@@ -101,18 +101,20 @@ jobs:
               && apt-get install -y --no-install-recommends build-essential \
               && rm -rf /var/lib/apt/lists/*
 
-          COPY requirements.txt /app/requirements.txt
+          # Menyesuaikan jalur salin dari folder MLProject ke dalam Docker image
+          COPY MLProject/requirements.txt /app/requirements.txt
           RUN python -m pip install --upgrade pip \
               && pip install --no-cache-dir -r /app/requirements.txt \
               && pip install --no-cache-dir "fastapi==0.109.2" "starlette==0.36.3"
 
-          COPY mlruns /app/mlruns
+          COPY MLProject/mlruns /app/mlruns
 
           EXPOSE 8000
 
           CMD ["mlflow", "models", "serve", "-m", "/app/mlruns/0/${RUN_ID}/artifacts/model", "--host", "0.0.0.0", "--port", "8000", "--env-manager", "local"]
           EOF
 
+          # Build dijalankan dari root direktori agar bisa mengakses folder MLProject/ dengan aman
           docker build \
             --build-arg RUN_ID="$RUN_ID" \
             -t "$IMAGE" \
